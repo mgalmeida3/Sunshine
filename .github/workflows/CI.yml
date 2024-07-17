@@ -959,7 +959,6 @@ jobs:
   build_win:
     name: Windows
     runs-on: windows-2019
-    needs: [setup_release]
 
     steps:
       - name: Checkout
@@ -1137,10 +1136,6 @@ jobs:
 
       - name: Build Windows
         shell: msys2 {0}
-        env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
-          BUILD_VERSION: ${{ needs.setup_release.outputs.release_tag }}
-          COMMIT: ${{ needs.setup_release.outputs.release_commit }}
         run: |
           mkdir -p build
           cmake \
