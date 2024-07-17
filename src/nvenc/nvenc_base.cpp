@@ -325,6 +325,7 @@ namespace nvenc {
         format_config.singleSliceIntraRefresh = 1;
         format_config.intraRefreshPeriod = 300;
         format_config.intraRefreshCnt = 299;
+        //:-)
         break;
       }
 
