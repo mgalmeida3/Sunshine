@@ -44,19 +44,38 @@ namespace nvhttp {
 
   crypto::cert_chain_t cert_chain;
 
-  class SunshineHttpsServer: public SimpleWeb::Server<SimpleWeb::HTTPS> {
+  class SunshineHTTPS: public SimpleWeb::HTTPS {
   public:
-    SunshineHttpsServer(const std::string &certification_file, const std::string &private_key_file):
-        SimpleWeb::Server<SimpleWeb::HTTPS>::Server(certification_file, private_key_file) {}
+    SunshineHTTPS(boost::asio::io_service &io_service, boost::asio::ssl::context &ctx):
+        SimpleWeb::HTTPS(io_service, ctx) {}
+
+    virtual ~SunshineHTTPS() {
+      // Gracefully shutdown the TLS connection
+      SimpleWeb::error_code ec;
+      shutdown(ec);
+    }
+  };
+
+  class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
+  public:
+    SunshineHTTPSServer(const std::string &certification_file, const std::string &private_key_file):
+        ServerBase<SunshineHTTPS>::ServerBase(443),
+        context(boost::asio::ssl::context::tls_server) {
+      // Disabling TLS 1.0 and 1.1 (see RFC 8996)
+      context.set_options(boost::asio::ssl::context::no_tlsv1);
+      context.set_options(boost::asio::ssl::context::no_tlsv1_1);
+      context.use_certificate_chain_file(certification_file);
+      context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
+    }
 
     std::function<int(SSL *)> verify;
     std::function<void(std::shared_ptr<Response>, std::shared_ptr<Request>)> on_verify_failed;
 
   protected:
+    boost::asio::ssl::context context;
+
     void
     after_bind() override {
-      SimpleWeb::Server<SimpleWeb::HTTPS>::after_bind();
-
       if (verify) {
         context.set_verify_mode(boost::asio::ssl::verify_peer | boost::asio::ssl::verify_fail_if_no_peer_cert | boost::asio::ssl::verify_client_once);
         context.set_verify_callback([](int verified, boost::asio::ssl::verify_context &ctx) {
@@ -108,7 +127,7 @@ namespace nvhttp {
     }
   };
 
-  using https_server_t = SunshineHttpsServer;
+  using https_server_t = SunshineHTTPSServer;
   using http_server_t = SimpleWeb::Server<SimpleWeb::HTTP>;
 
   struct conf_intern_t {
@@ -123,7 +142,6 @@ namespace nvhttp {
   };
 
   struct client_t {
-    std::vector<std::string> certs;
     std::vector<named_cert_t> named_devices;
   };
 
@@ -131,6 +149,7 @@ namespace nvhttp {
     struct {
       std::string uniqueID;
       std::string cert;
+      std::string name;
     } client;
 
     std::unique_ptr<crypto::aes_t> cipher_key;
@@ -142,7 +161,7 @@ namespace nvhttp {
     struct {
       util::Either<
         std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>,
-        std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>>
+        std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>>
         response;
       std::string salt;
     } async_insert_pin;
@@ -154,8 +173,8 @@ namespace nvhttp {
   std::atomic<uint32_t> session_id_counter;
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
-  using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
-  using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
+  using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
+  using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
   using resp_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>;
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
 
@@ -258,7 +277,6 @@ namespace nvhttp {
             named_cert.cert = el.get_value<std::string>();
             named_cert.uuid = uuid_util::uuid_t::generate().string();
             client.named_devices.emplace_back(named_cert);
-            client.certs.emplace_back(named_cert.cert);
           }
         }
       }
@@ -271,15 +289,11 @@ namespace nvhttp {
         named_cert.cert = el.get_child("cert").get_value<std::string>();
         named_cert.uuid = el.get_child("uuid").get_value<std::string>();
         client.named_devices.emplace_back(named_cert);
-        client.certs.emplace_back(named_cert.cert);
       }
     }
 
     // Empty certificate chain and import certs from file
     cert_chain.clear();
-    for (auto &cert : client.certs) {
-      cert_chain.add(crypto::x509(cert));
-    }
     for (auto &named_cert : client.named_devices) {
       cert_chain.add(crypto::x509(named_cert.cert));
     }
@@ -288,17 +302,13 @@ namespace nvhttp {
   }
 
   void
-  update_id_client(const std::string &uniqueID, std::string &&cert, op_e op) {
-    switch (op) {
-      case op_e::ADD: {
-        client_t &client = client_root;
-        client.certs.emplace_back(std::move(cert));
-      } break;
-      case op_e::REMOVE:
-        client_t client;
-        client_root = client;
-        break;
-    }
+  add_authorized_client(const std::string &name, std::string &&cert) {
+    client_t &client = client_root;
+    named_cert_t named_cert;
+    named_cert.name = name;
+    named_cert.cert = std::move(cert);
+    named_cert.uuid = uuid_util::uuid_t::generate().string();
+    client.named_devices.emplace_back(named_cert);
 
     if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
       save_state();
@@ -466,9 +476,9 @@ namespace nvhttp {
       tree.put("root.paired", 1);
       add_cert->raise(crypto::x509(client.cert));
 
+      // The client is now successfully paired and will be authorized to connect
       auto it = map_id_sess.find(client.uniqueID);
-
-      update_id_client(client.uniqueID, std::move(client.cert), op_e::ADD);
+      add_authorized_client(client.name, std::move(client.cert));
       map_id_sess.erase(it);
     }
     else {
@@ -483,7 +493,7 @@ namespace nvhttp {
   struct tunnel;
 
   template <>
-  struct tunnel<SimpleWeb::HTTPS> {
+  struct tunnel<SunshineHTTPS> {
     static auto constexpr to_string = "HTTPS"sv;
   };
 
@@ -635,14 +645,7 @@ namespace nvhttp {
 
     auto &sess = std::begin(map_id_sess)->second;
     getservercert(sess, tree, pin);
-
-    // set up named cert
-    client_t &client = client_root;
-    named_cert_t named_cert;
-    named_cert.name = name;
-    named_cert.cert = sess.client.cert;
-    named_cert.uuid = uuid_util::uuid_t::generate().string();
-    client.named_devices.emplace_back(named_cert);
+    sess.client.name = name;
 
     // response to the request for pin
     std::ostringstream data;
@@ -671,7 +674,7 @@ namespace nvhttp {
     print_req<T>(request);
 
     int pair_status = 0;
-    if constexpr (std::is_same_v<SimpleWeb::HTTPS, T>) {
+    if constexpr (std::is_same_v<SunshineHTTPS, T>) {
       auto args = request->parse_query_string();
       auto clientID = args.find("uniqueid"s);
 
@@ -696,7 +699,7 @@ namespace nvhttp {
 
     // Only include the MAC address for requests sent from paired clients over HTTPS.
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
-    if constexpr (std::is_same_v<SimpleWeb::HTTPS, T>) {
+    if constexpr (std::is_same_v<SunshineHTTPS, T>) {
       tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
     }
     else {
@@ -720,45 +723,35 @@ namespace nvhttp {
     }
 
     uint32_t codec_mode_flags = SCM_H264;
+    if (video::last_encoder_probe_supported_yuv444_for_codec[0]) {
+      codec_mode_flags |= SCM_H264_HIGH8_444;
+    }
     if (video::active_hevc_mode >= 2) {
       codec_mode_flags |= SCM_HEVC;
+      if (video::last_encoder_probe_supported_yuv444_for_codec[1]) {
+        codec_mode_flags |= SCM_HEVC_REXT8_444;
+      }
     }
     if (video::active_hevc_mode >= 3) {
       codec_mode_flags |= SCM_HEVC_MAIN10;
+      if (video::last_encoder_probe_supported_yuv444_for_codec[1]) {
+        codec_mode_flags |= SCM_HEVC_REXT10_444;
+      }
     }
     if (video::active_av1_mode >= 2) {
       codec_mode_flags |= SCM_AV1_MAIN8;
+      if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
+        codec_mode_flags |= SCM_AV1_HIGH8_444;
+      }
     }
     if (video::active_av1_mode >= 3) {
       codec_mode_flags |= SCM_AV1_MAIN10;
+      if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
+        codec_mode_flags |= SCM_AV1_HIGH10_444;
+      }
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
 
-    pt::ptree display_nodes;
-    for (auto &resolution : config::nvhttp.resolutions) {
-      auto pred = [](auto ch) { return ch == ' ' || ch == '\t' || ch == 'x'; };
-
-      auto middle = std::find_if(std::begin(resolution), std::end(resolution), pred);
-      if (middle == std::end(resolution)) {
-        BOOST_LOG(warning) << resolution << " is not in the proper format for a resolution: WIDTHxHEIGHT"sv;
-        continue;
-      }
-
-      auto width = util::from_chars(&*std::begin(resolution), &*middle);
-      auto height = util::from_chars(&*(middle + 1), &*std::end(resolution));
-      for (auto fps : config::nvhttp.fps) {
-        pt::ptree display_node;
-        display_node.put("Width", width);
-        display_node.put("Height", height);
-        display_node.put("RefreshRate", fps);
-
-        display_nodes.add_child("DisplayMode", display_node);
-      }
-    }
-
-    if (!config::nvhttp.resolutions.empty()) {
-      tree.add_child("root.SupportedDisplayMode", display_nodes);
-    }
     auto current_appid = proc::proc.running();
     tree.put("root.PairStatus", pair_status);
     tree.put("root.currentgame", current_appid);
@@ -787,7 +780,7 @@ namespace nvhttp {
 
   void
   applist(resp_https_t response, req_https_t request) {
-    print_req<SimpleWeb::HTTPS>(request);
+    print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
 
@@ -816,7 +809,7 @@ namespace nvhttp {
 
   void
   launch(bool &host_audio, resp_https_t response, req_https_t request) {
-    print_req<SimpleWeb::HTTPS>(request);
+    print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -826,14 +819,6 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
-
-    if (rtsp_stream::session_count() == config::stream.channels) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "The host's concurrent stream limit has been reached. Stop an existing stream or increase the 'Channels' value in the Sunshine Web UI.");
-
-      return;
-    }
 
     auto args = request->parse_query_string();
     if (
@@ -909,7 +894,7 @@ namespace nvhttp {
 
   void
   resume(bool &host_audio, resp_https_t response, req_https_t request) {
-    print_req<SimpleWeb::HTTPS>(request);
+    print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -919,16 +904,6 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
-
-    // It is possible that due a race condition that this if-statement gives a false negative,
-    // that is automatically resolved in rtsp_server_t
-    if (rtsp_stream::session_count() == config::stream.channels) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "The host's concurrent stream limit has been reached. Stop an existing stream or increase the 'Channels' value in the Sunshine Web UI.");
-
-      return;
-    }
 
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
@@ -995,7 +970,7 @@ namespace nvhttp {
 
   void
   cancel(resp_https_t response, req_https_t request) {
-    print_req<SimpleWeb::HTTPS>(request);
+    print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -1006,18 +981,10 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
-    // It is possible that due a race condition that this if-statement gives a false positive,
-    // the client should try again
-    if (rtsp_stream::session_count() != 0) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "All sessions must be disconnected before quitting");
-
-      return;
-    }
-
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
+
+    rtsp_stream::terminate_sessions();
 
     if (proc::proc.running() > 0) {
       proc::proc.terminate();
@@ -1026,7 +993,7 @@ namespace nvhttp {
 
   void
   appasset(resp_https_t response, req_https_t request) {
-    print_req<SimpleWeb::HTTPS>(request);
+    print_req<SunshineHTTPS>(request);
 
     auto args = request->parse_query_string();
     auto app_image = proc::proc.get_app_image(util::from_view(get_arg(args, "appid")));
@@ -1066,7 +1033,13 @@ namespace nvhttp {
 
     // Verify certificates after establishing connection
     https_server.verify = [add_cert](SSL *ssl) {
-      crypto::x509_t x509 { SSL_get_peer_certificate(ssl) };
+      crypto::x509_t x509 {
+#if OPENSSL_VERSION_MAJOR >= 3
+        SSL_get1_peer_certificate(ssl)
+#else
+        SSL_get_peer_certificate(ssl)
+#endif
+      };
       if (!x509) {
         BOOST_LOG(info) << "unknown -- denied"sv;
         return 0;
@@ -1119,9 +1092,9 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message"s, "The client is not authorized. Certificate verification failed."s);
     };
 
-    https_server.default_resource["GET"] = not_found<SimpleWeb::HTTPS>;
-    https_server.resource["^/serverinfo$"]["GET"] = serverinfo<SimpleWeb::HTTPS>;
-    https_server.resource["^/pair$"]["GET"] = [&add_cert](auto resp, auto req) { pair<SimpleWeb::HTTPS>(add_cert, resp, req); };
+    https_server.default_resource["GET"] = not_found<SunshineHTTPS>;
+    https_server.resource["^/serverinfo$"]["GET"] = serverinfo<SunshineHTTPS>;
+    https_server.resource["^/pair$"]["GET"] = [&add_cert](auto resp, auto req) { pair<SunshineHTTPS>(add_cert, resp, req); };
     https_server.resource["^/applist$"]["GET"] = applist;
     https_server.resource["^/appasset$"]["GET"] = appasset;
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) { launch(host_audio, resp, req); };
@@ -1182,18 +1155,6 @@ namespace nvhttp {
     client_t &client = client_root;
     for (auto it = client.named_devices.begin(); it != client.named_devices.end();) {
       if ((*it).uuid == uuid) {
-        // Find matching cert and remove it
-        for (auto cert = client.certs.begin(); cert != client.certs.end();) {
-          if ((*cert) == (*it).cert) {
-            cert = client.certs.erase(cert);
-            removed++;
-          }
-          else {
-            ++cert;
-          }
-        }
-
-        // And then remove the named cert
         it = client.named_devices.erase(it);
         removed++;
       }

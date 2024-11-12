@@ -324,6 +324,11 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Get the list of available applications.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   getApps(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -336,6 +341,11 @@ namespace confighttp {
     response->write(content, headers);
   }
 
+  /**
+   * @brief Get the logs from the log file.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   getLogs(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -348,6 +358,36 @@ namespace confighttp {
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
   }
 
+  /**
+   * @brief Save an application. If the application already exists, it will be updated, otherwise it will be added.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *   "name": "Application Name",
+   *   "output": "Log Output Path",
+   *   "cmd": "Command to run the application",
+   *   "index": -1,
+   *   "exclude-global-prep-cmd": false,
+   *   "elevated": false,
+   *   "auto-detach": true,
+   *   "wait-all": true,
+   *   "exit-timeout": 5,
+   *   "prep-cmd": [
+   *     {
+   *       "do": "Command to prepare",
+   *       "undo": "Command to undo preparation",
+   *       "elevated": false
+   *     }
+   *   ],
+   *   "detached": [
+   *     "Detached command"
+   *   ],
+   *   "image-path": "Full path to the application image. Must be a png file.",
+   * }
+   * @endcode
+   */
   void
   saveApp(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -393,18 +433,35 @@ namespace confighttp {
         // Unfortunately Boost PT does not allow to directly edit the array, copy should do the trick
         pt::ptree newApps;
         int i = 0;
-        for (const auto &kv : apps_node) {
+        for (const auto &[k, v] : apps_node) {
           if (i == index) {
             newApps.push_back(std::make_pair("", inputTree));
           }
           else {
-            newApps.push_back(std::make_pair("", kv.second));
+            newApps.push_back(std::make_pair("", v));
           }
           i++;
         }
         fileTree.erase("apps");
         fileTree.push_back(std::make_pair("apps", newApps));
       }
+
+      // Sort the apps array by name
+      std::vector<pt::ptree> apps_vector;
+      for (const auto &[k, v] : fileTree.get_child("apps")) {
+        apps_vector.push_back(v);
+      }
+      std::ranges::sort(apps_vector, [](const pt::ptree &a, const pt::ptree &b) {
+        return a.get<std::string>("name") < b.get<std::string>("name");
+      });
+
+      pt::ptree sorted_apps;
+      for (const auto &app : apps_vector) {
+        sorted_apps.push_back(std::make_pair("", app));
+      }
+      fileTree.erase("apps");
+      fileTree.add_child("apps", sorted_apps);
+
       pt::write_json(config::stream.file_apps, fileTree);
     }
     catch (std::exception &e) {
@@ -419,6 +476,11 @@ namespace confighttp {
     proc::refresh(config::stream.file_apps);
   }
 
+  /**
+   * @brief Delete an application.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   deleteApp(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -447,9 +509,9 @@ namespace confighttp {
         // Unfortunately Boost PT does not allow to directly edit the array, copy should do the trick
         pt::ptree newApps;
         int i = 0;
-        for (const auto &kv : apps_node) {
+        for (const auto &[k, v] : apps_node) {
           if (i++ != index) {
-            newApps.push_back(std::make_pair("", kv.second));
+            newApps.push_back(std::make_pair("", v));
           }
         }
         fileTree.erase("apps");
@@ -468,6 +530,18 @@ namespace confighttp {
     proc::refresh(config::stream.file_apps);
   }
 
+  /**
+   * @brief Upload a cover image.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *   "key": "igdb_<game_id>",
+   *   "url": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/<slug>.png",
+   * }
+   * @endcode
+   */
   void
   uploadCover(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -528,6 +602,11 @@ namespace confighttp {
     outputTree.put("path", path);
   }
 
+  /**
+   * @brief Get the configuration settings.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   getConfig(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -553,6 +632,11 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Get the locale setting. This endpoint does not require authentication.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   getLocale(resp_https_t response, req_https_t request) {
     // we need to return the locale whether authenticated or not
@@ -571,6 +655,19 @@ namespace confighttp {
     outputTree.put("locale", config::sunshine.locale);
   }
 
+  /**
+   * @brief Save the configuration settings.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *   "key": "value"
+   * }
+   * @endcode
+   *
+   * @attention{It is recommended to ONLY save the config settings that differ from the default behavior.}
+   */
   void
   saveConfig(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -591,11 +688,11 @@ namespace confighttp {
     try {
       // TODO: Input Validation
       pt::read_json(ss, inputTree);
-      for (const auto &kv : inputTree) {
-        std::string value = inputTree.get<std::string>(kv.first);
+      for (const auto &[k, v] : inputTree) {
+        std::string value = inputTree.get<std::string>(k);
         if (value.length() == 0 || value.compare("null") == 0) continue;
 
-        configStream << kv.first << " = " << value << std::endl;
+        configStream << k << " = " << value << std::endl;
       }
       file_handler::write_file(config::sunshine.config_file.c_str(), configStream.str());
     }
@@ -607,6 +704,11 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Restart Sunshine.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   restart(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -617,6 +719,21 @@ namespace confighttp {
     platf::restart();
   }
 
+  /**
+   * @brief Update existing credentials.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *   "currentUsername": "Current Username",
+   *   "currentPassword": "Current Password",
+   *   "newUsername": "New Username",
+   *   "newPassword": "New Password",
+   *   "confirmNewPassword": "Confirm New Password"
+   * }
+   * @endcode
+   */
   void
   savePassword(resp_https_t response, req_https_t request) {
     if (!config::sunshine.username.empty() && !authenticate(response, request)) return;
@@ -675,6 +792,18 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Send a pin code to the host. The pin is generated from the Moonlight client during the pairing process.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *   "pin": "<pin>",
+   *   "name": "Friendly Client Name"
+   * }
+   * @endcode
+   */
   void
   savePin(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -707,6 +836,11 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Unpair all clients.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   unpairAll(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -725,6 +859,17 @@ namespace confighttp {
     outputTree.put("status", true);
   }
 
+  /**
+   * @brief Unpair a client.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *  "uuid": "<uuid>"
+   * }
+   * @endcode
+   */
   void
   unpair(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -756,6 +901,11 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Get the list of paired clients.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   listClients(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
@@ -778,6 +928,11 @@ namespace confighttp {
     outputTree.put("status", true);
   }
 
+  /**
+   * @brief Close the currently running application.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
   void
   closeApp(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;

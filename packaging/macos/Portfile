@@ -34,9 +34,7 @@ post-fetch {
 depends_build-append     port:doxygen \
                          port:graphviz \
                          port:npm9 \
-                         port:pkgconfig \
-                         port:python311 \
-                         port:py311-pip
+                         port:pkgconfig
 
 depends_lib              port:curl \
                          port:libopus \
@@ -45,14 +43,17 @@ depends_lib              port:curl \
 configure.args           -DBOOST_USE_STATIC=ON \
                          -DBUILD_WERROR=ON \
                          -DCMAKE_INSTALL_PREFIX=${prefix} \
-                         -DSUNSHINE_ASSETS_DIR=etc/sunshine/assets
+                         -DSUNSHINE_ASSETS_DIR=etc/sunshine/assets \
+                         -DSUNSHINE_PUBLISHER_NAME='LizardByte' \
+                         -DSUNSHINE_PUBLISHER_WEBSITE='https://app.lizardbyte.dev' \
+                         -DSUNSHINE_PUBLISHER_ISSUE_URL='https://app.lizardbyte.dev/support'
 
 configure.env-append     BRANCH=@GITHUB_BRANCH@
 configure.env-append     BUILD_VERSION=@BUILD_VERSION@
 configure.env-append     COMMIT=@GITHUB_COMMIT@
 
 startupitem.create       yes
-startupitem.executable   "${prefix}/bin/{$name}"
+startupitem.executable   "${prefix}/bin/sunshine"
 startupitem.location     LaunchDaemons
 startupitem.name         ${name}
 startupitem.netchange    yes

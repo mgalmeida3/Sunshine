@@ -57,7 +57,7 @@ namespace proc {
   }
 
   void
-  terminate_process_group(boost::process::child &proc, boost::process::group &group, std::chrono::seconds exit_timeout) {
+  terminate_process_group(boost::process::v1::child &proc, boost::process::v1::group &group, std::chrono::seconds exit_timeout) {
     if (group.valid() && platf::process_group_running((std::uintptr_t) group.native_handle())) {
       if (exit_timeout.count() > 0) {
         // Request processes in the group to exit gracefully
@@ -87,7 +87,8 @@ namespace proc {
 
       // We always call terminate() even if we waited successfully for all processes above.
       // This ensures the process group state is consistent with the OS in boost.
-      group.terminate();
+      std::error_code ec;
+      group.terminate(ec);
       group.detach();
     }
 
@@ -98,7 +99,7 @@ namespace proc {
   }
 
   boost::filesystem::path
-  find_working_directory(const std::string &cmd, boost::process::environment &env) {
+  find_working_directory(const std::string &cmd, boost::process::v1::environment &env) {
     // Parse the raw command string into parts to get the actual command portion
 #ifdef _WIN32
     auto parts = boost::program_options::split_winmain(cmd);
@@ -120,7 +121,7 @@ namespace proc {
     // If the cmd path is not an absolute path, resolve it using our PATH variable
     boost::filesystem::path cmd_path(parts.at(0));
     if (!cmd_path.is_absolute()) {
-      cmd_path = boost::process::search_path(parts.at(0));
+      cmd_path = boost::process::v1::search_path(parts.at(0));
       if (cmd_path.empty()) {
         BOOST_LOG(error) << "Unable to find executable ["sv << parts.at(0) << "]. Is it in your PATH?"sv;
         return boost::filesystem::path();
@@ -268,6 +269,16 @@ namespace proc {
 
   int
   proc_t::running() {
+#ifndef _WIN32
+    // On POSIX OSes, we must periodically wait for our children to avoid
+    // them becoming zombies. This must be synchronized carefully with
+    // calls to bp::wait() and platf::process_group_running() which both
+    // invoke waitpid() under the hood.
+    auto reaper = util::fail_guard([]() {
+      while (waitpid(-1, nullptr, WNOHANG) > 0);
+    });
+#endif
+
     if (placebo) {
       return _app_id;
     }
@@ -301,8 +312,8 @@ namespace proc {
     std::error_code ec;
     placebo = false;
     terminate_process_group(_process, _process_group, _app.exit_timeout);
-    _process = boost::process::child();
-    _process_group = boost::process::group();
+    _process = boost::process::v1::child();
+    _process_group = boost::process::v1::group();
 
     for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {
       auto &cmd = *(_app_prep_it - 1);
@@ -403,7 +414,7 @@ namespace proc {
   }
 
   std::string
-  parse_env_val(boost::process::native_environment &env, const std::string_view &val_raw) {
+  parse_env_val(boost::process::v1::native_environment &env, const std::string_view &val_raw) {
     auto pos = std::begin(val_raw);
     auto dollar = std::find(pos, std::end(val_raw), '$');
 

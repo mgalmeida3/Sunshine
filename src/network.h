@@ -53,7 +53,7 @@ namespace net {
   from_address(const std::string_view &view);
 
   host_t
-  host_create(af_e af, ENetAddress &addr, std::size_t peers, std::uint16_t port);
+  host_create(af_e af, ENetAddress &addr, std::uint16_t port);
 
   /**
    * @brief Get the address family enum value from a string.
@@ -105,4 +105,12 @@ namespace net {
    */
   int
   encryption_mode_for_address(boost::asio::ip::address address);
+
+  /**
+   * @brief Returns a string for use as the instance name for mDNS.
+   * @param hostname The hostname to use for instance name generation.
+   * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
+   */
+  std::string
+  mdns_instance_name(const std::string_view &hostname);
 }  // namespace net

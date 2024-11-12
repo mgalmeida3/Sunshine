@@ -59,7 +59,7 @@ namespace config {
   }  // namespace nv
 
   namespace amd {
-#ifdef __APPLE__
+#ifndef _WIN32
   // values accurate as of 27/12/2022, but aren't strictly necessary for MacOS build
   #define AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_SPEED 100
   #define AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_QUALITY 30
@@ -101,6 +101,9 @@ namespace config {
   #define AMF_VIDEO_ENCODER_CABAC 1
   #define AMF_VIDEO_ENCODER_CALV 2
 #else
+  #ifdef _GLIBCXX_USE_C99_INTTYPES
+    #undef _GLIBCXX_USE_C99_INTTYPES
+  #endif
   #include <AMF/components/VideoEncoderAV1.h>
   #include <AMF/components/VideoEncoderHEVC.h>
   #include <AMF/components/VideoEncoderVCE.h>
@@ -374,6 +377,10 @@ namespace config {
       -1,
     },  // vt
 
+    {
+      false,  // strict_rc_buffer
+    },  // vaapi
+
     {},  // capture
     {},  // encoder
     {},  // adapter_name
@@ -392,7 +399,6 @@ namespace config {
     APPS_JSON_PATH,
 
     20,  // fecPercentage
-    1,  // channels
 
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
@@ -404,24 +410,9 @@ namespace config {
     PRIVATE_KEY_FILE,
     CERTIFICATE_FILE,
 
-    boost::asio::ip::host_name(),  // sunshine_name,
+    platf::get_host_name(),  // sunshine_name,
     "sunshine_state.json"s,  // file_state
     {},  // external_ip
-    {
-      "352x240"s,
-      "480x360"s,
-      "858x480"s,
-      "1280x720"s,
-      "1920x1080"s,
-      "2560x1080"s,
-      "2560x1440"s,
-      "3440x1440"s,
-      "1920x1200"s,
-      "3840x2160"s,
-      "3840x1600"s,
-    },  // supported resolutions
-
-    { 10, 30, 60, 90, 120 },  // supported fps
   };
 
   input_t input {
@@ -1027,6 +1018,8 @@ namespace config {
     int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);
     int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
 
+    bool_f(vars, "vaapi_strict_rc_buffer", video.vaapi.strict_rc_buffer);
+
     string_f(vars, "capture", video.capture);
     string_f(vars, "encoder", video.encoder);
     string_f(vars, "adapter_name", video.adapter_name);
@@ -1044,8 +1037,6 @@ namespace config {
     path_f(vars, "credentials_file", config::sunshine.credentials_file);
 
     string_f(vars, "external_ip", nvhttp.external_ip);
-    list_string_f(vars, "resolutions"s, nvhttp.resolutions);
-    list_int_f(vars, "fps"s, nvhttp.fps);
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
 
     string_f(vars, "audio_sink", audio.sink);
@@ -1059,8 +1050,6 @@ namespace config {
     if (to != -1) {
       stream.ping_timeout = std::chrono::milliseconds(to);
     }
-
-    int_between_f(vars, "channels", stream.channels, { 1, std::numeric_limits<int>::max() });
 
     int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, { 0, 2 });
     int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, { 0, 2 });

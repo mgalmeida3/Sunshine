@@ -34,6 +34,11 @@ namespace crypto {
   using pkey_ctx_t = util::safe_ptr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
   using bignum_t = util::safe_ptr<BIGNUM, BN_free>;
 
+  /**
+   * @brief Hashes the given plaintext using SHA-256.
+   * @param plaintext
+   * @return The SHA-256 hash of the plaintext.
+   */
   sha256_t
   hash(const std::string_view &plaintext);
 
@@ -124,6 +129,17 @@ namespace crypto {
       operator=(gcm_t &&) noexcept = default;
 
       gcm_t(const crypto::aes_t &key, bool padding = true);
+
+      /**
+       * @brief Encrypts the plaintext using AES GCM mode.
+       * @param plaintext The plaintext data to be encrypted.
+       * @param tag The buffer where the GCM tag will be written.
+       * @param ciphertext The buffer where the resulting ciphertext will be written.
+       * @param iv The initialization vector to be used for the encryption.
+       * @return The total length of the ciphertext and GCM tag. Returns -1 in case of an error.
+       */
+      int
+      encrypt(const std::string_view &plaintext, std::uint8_t *tag, std::uint8_t *ciphertext, aes_t *iv);
 
       /**
        * @brief Encrypts the plaintext using AES GCM mode.

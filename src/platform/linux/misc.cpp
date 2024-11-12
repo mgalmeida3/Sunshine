@@ -15,7 +15,8 @@
 // lib includes
 #include <arpa/inet.h>
 #include <boost/asio/ip/address.hpp>
-#include <boost/process.hpp>
+#include <boost/asio/ip/host_name.hpp>
+#include <boost/process/v1.hpp>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -241,22 +242,24 @@ namespace platf {
 
   bp::child
   run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+    // clang-format off
     if (!group) {
       if (!file) {
-        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_out > bp::null, bp::std_err > bp::null, ec);
+        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > bp::null, bp::std_err > bp::null, bp::limit_handles, ec);
       }
       else {
-        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_out > file, bp::std_err > file, ec);
+        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > file, bp::std_err > file, bp::limit_handles, ec);
       }
     }
     else {
       if (!file) {
-        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_out > bp::null, bp::std_err > bp::null, ec, *group);
+        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > bp::null, bp::std_err > bp::null, bp::limit_handles, ec, *group);
       }
       else {
-        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_out > file, bp::std_err > file, ec, *group);
+        return bp::child(cmd, env, bp::start_dir(working_dir), bp::std_in < bp::null, bp::std_out > file, bp::std_err > file, bp::limit_handles, ec, *group);
       }
     }
+    // clang-format on
   }
 
   /**
@@ -269,7 +272,7 @@ namespace platf {
     auto working_dir = boost::filesystem::path(std::getenv("HOME"));
     std::string cmd = R"(xdg-open ")" + url + R"(")";
 
-    boost::process::environment _env = boost::this_process::environment();
+    boost::process::v1::environment _env = boost::this_process::environment();
     std::error_code ec;
     auto child = run_command(false, false, cmd, working_dir, _env, nullptr, ec, nullptr);
     if (ec) {
@@ -324,6 +327,16 @@ namespace platf {
     // Gracefully clean up and restart ourselves instead of exiting
     atexit(restart_on_exit);
     lifetime::exit_sunshine(0, true);
+  }
+
+  int
+  set_env(const std::string &name, const std::string &value) {
+    return setenv(name.c_str(), value.c_str(), 1);
+  }
+
+  int
+  unset_env(const std::string &name) {
+    return unsetenv(name.c_str());
   }
 
   bool
@@ -433,22 +446,48 @@ namespace platf {
       memcpy(CMSG_DATA(pktinfo_cm), &pktInfo, sizeof(pktInfo));
     }
 
+    auto const max_iovs_per_msg = send_info.payload_buffers.size() + (send_info.headers ? 1 : 0);
+
 #ifdef UDP_SEGMENT
     {
-      struct iovec iov = {};
-
-      msg.msg_iov = &iov;
-      msg.msg_iovlen = 1;
-
       // UDP GSO on Linux currently only supports sending 64K or 64 segments at a time
       size_t seg_index = 0;
       const size_t seg_max = 65536 / 1500;
+      struct iovec iovs[(send_info.headers ? std::min(seg_max, send_info.block_count) : 1) * max_iovs_per_msg] = {};
+      auto msg_size = send_info.header_size + send_info.payload_size;
       while (seg_index < send_info.block_count) {
-        iov.iov_base = (void *) &send_info.buffer[seg_index * send_info.block_size];
-        iov.iov_len = send_info.block_size * std::min(send_info.block_count - seg_index, seg_max);
+        int iovlen = 0;
+        auto segs_in_batch = std::min(send_info.block_count - seg_index, seg_max);
+        if (send_info.headers) {
+          // Interleave iovs for headers and payloads
+          for (auto i = 0; i < segs_in_batch; i++) {
+            iovs[iovlen].iov_base = (void *) &send_info.headers[(send_info.block_offset + seg_index + i) * send_info.header_size];
+            iovs[iovlen].iov_len = send_info.header_size;
+            iovlen++;
+            auto payload_desc = send_info.buffer_for_payload_offset((send_info.block_offset + seg_index + i) * send_info.payload_size);
+            iovs[iovlen].iov_base = (void *) payload_desc.buffer;
+            iovs[iovlen].iov_len = send_info.payload_size;
+            iovlen++;
+          }
+        }
+        else {
+          // Translate buffer descriptors into iovs
+          auto payload_offset = (send_info.block_offset + seg_index) * send_info.payload_size;
+          auto payload_length = payload_offset + (segs_in_batch * send_info.payload_size);
+          while (payload_offset < payload_length) {
+            auto payload_desc = send_info.buffer_for_payload_offset(payload_offset);
+            iovs[iovlen].iov_base = (void *) payload_desc.buffer;
+            iovs[iovlen].iov_len = std::min(payload_desc.size, payload_length - payload_offset);
+            payload_offset += iovs[iovlen].iov_len;
+            iovlen++;
+          }
+        }
+
+        msg.msg_iov = iovs;
+        msg.msg_iovlen = iovlen;
 
         // We should not use GSO if the data is <= one full block size
-        if (iov.iov_len > send_info.block_size) {
+        if (segs_in_batch > 1) {
           msg.msg_controllen = cmbuflen + CMSG_SPACE(sizeof(uint16_t));
 
           // Enable GSO to perform segmentation of our buffer for us
@@ -456,7 +495,7 @@ namespace platf {
           cm->cmsg_level = SOL_UDP;
           cm->cmsg_type = UDP_SEGMENT;
           cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
-          *((uint16_t *) CMSG_DATA(cm)) = send_info.block_size;
+          *((uint16_t *) CMSG_DATA(cm)) = msg_size;
         }
         else {
           msg.msg_controllen = cmbuflen;
@@ -483,10 +522,11 @@ namespace platf {
             continue;
           }
 
+          BOOST_LOG(verbose) << "sendmsg() failed: "sv << errno;
           break;
         }
 
-        seg_index += bytes_sent / send_info.block_size;
+        seg_index += bytes_sent / msg_size;
       }
 
       // If we sent something, return the status and don't fall back to the non-GSO path.
@@ -498,18 +538,25 @@ namespace platf {
 
     {
       // If GSO is not supported, use sendmmsg() instead.
-      struct mmsghdr msgs[send_info.block_count];
-      struct iovec iovs[send_info.block_count];
+      struct mmsghdr msgs[send_info.block_count] = {};
+      struct iovec iovs[send_info.block_count * (send_info.headers ? 2 : 1)] = {};
+      int iov_idx = 0;
       for (size_t i = 0; i < send_info.block_count; i++) {
-        iovs[i] = {};
-        iovs[i].iov_base = (void *) &send_info.buffer[i * send_info.block_size];
-        iovs[i].iov_len = send_info.block_size;
+        msgs[i].msg_hdr.msg_iov = &iovs[iov_idx];
+        msgs[i].msg_hdr.msg_iovlen = send_info.headers ? 2 : 1;
 
-        msgs[i] = {};
+        if (send_info.headers) {
+          iovs[iov_idx].iov_base = (void *) &send_info.headers[(send_info.block_offset + i) * send_info.header_size];
+          iovs[iov_idx].iov_len = send_info.header_size;
+          iov_idx++;
+        }
+        auto payload_desc = send_info.buffer_for_payload_offset((send_info.block_offset + i) * send_info.payload_size);
+        iovs[iov_idx].iov_base = (void *) payload_desc.buffer;
+        iovs[iov_idx].iov_len = send_info.payload_size;
+        iov_idx++;
+
         msgs[i].msg_hdr.msg_name = msg.msg_name;
         msgs[i].msg_hdr.msg_namelen = msg.msg_namelen;
-        msgs[i].msg_hdr.msg_iov = &iovs[i];
-        msgs[i].msg_hdr.msg_iovlen = 1;
         msgs[i].msg_hdr.msg_control = cmbuf.buf;
         msgs[i].msg_hdr.msg_controllen = cmbuflen;
       }
@@ -606,12 +653,19 @@ namespace platf {
       memcpy(CMSG_DATA(pktinfo_cm), &pktInfo, sizeof(pktInfo));
     }
 
-    struct iovec iov = {};
-    iov.iov_base = (void *) send_info.buffer;
-    iov.iov_len = send_info.size;
+    struct iovec iovs[2] = {};
+    int iovlen = 0;
+    if (send_info.header) {
+      iovs[iovlen].iov_base = (void *) send_info.header;
+      iovs[iovlen].iov_len = send_info.header_size;
+      iovlen++;
+    }
+    iovs[iovlen].iov_base = (void *) send_info.payload;
+    iovs[iovlen].iov_len = send_info.payload_size;
+    iovlen++;
 
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
+    msg.msg_iov = iovs;
+    msg.msg_iovlen = iovlen;
 
     msg.msg_controllen = cmbuflen;
 
@@ -744,6 +798,17 @@ namespace platf {
     return std::make_unique<qos_t>(sockfd, reset_options);
   }
 
+  std::string
+  get_host_name() {
+    try {
+      return boost::asio::ip::host_name();
+    }
+    catch (boost::system::system_error &err) {
+      BOOST_LOG(error) << "Failed to get hostname: "sv << err.what();
+      return "Sunshine"s;
+    }
+  }
+
   namespace source {
     enum source_e : std::size_t {
 #ifdef SUNSHINE_BUILD_CUDA
@@ -872,6 +937,10 @@ namespace platf {
 
   std::unique_ptr<deinit_t>
   init() {
+    // enable low latency mode for AMD
+    // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/30039
+    set_env("AMD_DEBUG", "lowlatencyenc");
+
     // These are allowed to fail.
     gbm::init();
 

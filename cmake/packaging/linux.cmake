@@ -2,9 +2,15 @@
 
 install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/assets/"
         DESTINATION "${SUNSHINE_ASSETS_DIR}")
-# copy assets to build directory, for running without install
+
+# copy assets (excluding shaders) to build directory, for running without install
 file(COPY "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/assets/"
-        DESTINATION "${CMAKE_BINARY_DIR}/assets")
+        DESTINATION "${CMAKE_BINARY_DIR}/assets"
+        PATTERN "shaders" EXCLUDE)
+# use symbolic link for shaders directory
+file(CREATE_LINK "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/assets/shaders"
+        "${CMAKE_BINARY_DIR}/assets/shaders" COPY_ON_ERROR SYMBOLIC)
+
 if(${SUNSHINE_BUILD_APPIMAGE} OR ${SUNSHINE_BUILD_FLATPAK})
     install(FILES "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/60-sunshine.rules"
             DESTINATION "${SUNSHINE_ASSETS_DIR}/udev/rules.d")
@@ -14,15 +20,23 @@ else()
     find_package(Systemd)
     find_package(Udev)
 
-    install(FILES "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/60-sunshine.rules"
-            DESTINATION "${UDEV_RULES_INSTALL_DIR}")
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sunshine.service"
-            DESTINATION "${SYSTEMD_USER_UNIT_INSTALL_DIR}")
+    if(UDEV_FOUND)
+        install(FILES "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/60-sunshine.rules"
+                DESTINATION "${UDEV_RULES_INSTALL_DIR}")
+    endif()
+    if(SYSTEMD_FOUND)
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sunshine.service"
+                DESTINATION "${SYSTEMD_USER_UNIT_INSTALL_DIR}")
+    endif()
 endif()
 
 # Post install
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/postinst")
+
+# Apply setcap for RPM
+# https://github.com/coreos/rpm-ostree/discussions/5036#discussioncomment-10291071
+set(CPACK_RPM_USER_FILELIST "%caps(cap_sys_admin+p) ${SUNSHINE_EXECUTABLE_PATH}")
 
 # Dependencies
 set(CPACK_DEB_COMPONENT_INSTALL ON)
@@ -37,7 +51,6 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libpulse0, \
             libva2, \
             libva-drm2, \
-            libvdpau1, \
             libwayland-client0, \
             libx11-6, \
             miniupnpc, \
@@ -50,7 +63,6 @@ set(CPACK_RPM_PACKAGE_REQUIRES "\
             libevdev >= 1.5.6, \
             libopusenc >= 0.2.1, \
             libva >= 2.14.0, \
-            libvdpau >= 1.5, \
             libwayland-client >= 1.20.0, \
             libX11 >= 1.7.3.1, \
             miniupnpc >= 2.2.4, \

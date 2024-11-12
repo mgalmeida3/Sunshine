@@ -33,7 +33,7 @@
   // lib includes
   #include "tray/src/tray.h"
   #include <boost/filesystem.hpp>
-  #include <boost/process/environment.hpp>
+  #include <boost/process/v1/environment.hpp>
 
   // local includes
   #include "confighttp.h"
@@ -58,11 +58,6 @@ namespace system_tray {
   void
   tray_donate_github_cb(struct tray_menu *item) {
     platf::open_url("https://github.com/sponsors/LizardByte");
-  }
-
-  void
-  tray_donate_mee6_cb(struct tray_menu *item) {
-    platf::open_url("https://mee6.xyz/m/804382334370578482");
   }
 
   void
@@ -111,7 +106,6 @@ namespace system_tray {
           .submenu =
             (struct tray_menu[]) {
               { .text = "GitHub Sponsors", .cb = tray_donate_github_cb },
-              { .text = "MEE6", .cb = tray_donate_mee6_cb },
               { .text = "Patreon", .cb = tray_donate_patreon_cb },
               { .text = "PayPal", .cb = tray_donate_paypal_cb },
               { .text = nullptr } } },

@@ -11,6 +11,10 @@
 #include <string>
 
 #include <boost/core/noncopyable.hpp>
+#ifndef _WIN32
+  #include <boost/asio.hpp>
+  #include <boost/process.hpp>
+#endif
 
 #include "src/config.h"
 #include "src/logging.h"
@@ -31,6 +35,7 @@ struct AVHWFramesContext;
 struct AVCodecContext;
 struct AVDictionary;
 
+#ifdef _WIN32
 // Forward declarations of boost classes to avoid having to include boost headers
 // here, which results in issues with Windows.h and WinSock2.h include order.
 namespace boost {
@@ -42,14 +47,15 @@ namespace boost {
   namespace filesystem {
     class path;
   }
-  namespace process {
+  namespace process::inline v1 {
     class child;
     class group;
     template <typename Char>
     class basic_environment;
     typedef basic_environment<char> environment;
-  }  // namespace process
+  }  // namespace process::inline v1
 }  // namespace boost
+#endif
 namespace video {
   struct config_t;
 }  // namespace video
@@ -209,6 +215,9 @@ namespace platf {
     yuv420p10,  ///< YUV 4:2:0 10-bit
     nv12,  ///< NV12
     p010,  ///< P010
+    ayuv,  ///< AYUV
+    yuv444p16,  ///< Planar 10-bit (shifted to 16-bit) YUV 4:4:4
+    y410,  ///< Y410
     unknown  ///< Unknown
   };
 
@@ -223,6 +232,9 @@ namespace platf {
       _CONVERT(yuv420p10);
       _CONVERT(nv12);
       _CONVERT(p010);
+      _CONVERT(ayuv);
+      _CONVERT(yuv444p16);
+      _CONVERT(y410);
       _CONVERT(unknown);
     }
 #undef _CONVERT
@@ -406,7 +418,7 @@ namespace platf {
      * @note Implementations may set or modify codec options prior to codec initialization.
      */
     virtual void
-    init_codec_options(AVCodecContext *ctx, AVDictionary *options) {};
+    init_codec_options(AVCodecContext *ctx, AVDictionary **options) {};
 
     /**
      * @brief Prepare to derive a context.
@@ -525,7 +537,7 @@ namespace platf {
   class mic_t {
   public:
     virtual capture_e
-    sample(std::vector<std::int16_t> &frame_buffer) = 0;
+    sample(std::vector<float> &frame_buffer) = 0;
 
     virtual ~mic_t() = default;
   };
@@ -585,8 +597,8 @@ namespace platf {
   bool
   needs_encoder_reenumeration();
 
-  boost::process::child
-  run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::environment &env, FILE *file, std::error_code &ec, boost::process::group *group);
+  boost::process::v1::child
+  run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
 
   enum class thread_priority_e : int {
     low,  ///< Low priority
@@ -606,22 +618,86 @@ namespace platf {
   void
   restart();
 
-  struct batched_send_info_t {
+  /**
+   * @brief Set an environment variable.
+   * @param name The name of the environment variable.
+   * @param value The value to set the environment variable to.
+   * @return 0 on success, non-zero on failure.
+   */
+  int
+  set_env(const std::string &name, const std::string &value);
+
+  /**
+   * @brief Unset an environment variable.
+   * @param name The name of the environment variable.
+   * @return 0 on success, non-zero on failure.
+   */
+  int
+  unset_env(const std::string &name);
+
+  struct buffer_descriptor_t {
     const char *buffer;
-    size_t block_size;
+    size_t size;
+
+    // Constructors required for emplace_back() prior to C++20
+    buffer_descriptor_t(const char *buffer, size_t size):
+        buffer(buffer), size(size) {}
+    buffer_descriptor_t():
+        buffer(nullptr), size(0) {}
+  };
+
+  struct batched_send_info_t {
+    // Optional headers to be prepended to each packet
+    const char *headers;
+    size_t header_size;
+
+    // One or more data buffers to use for the payloads
+    //
+    // NB: Data buffers must be aligned to payload size!
+    std::vector<buffer_descriptor_t> &payload_buffers;
+    size_t payload_size;
+
+    // The offset (in header+payload message blocks) in the header and payload
+    // buffers to begin sending messages from
+    size_t block_offset;
+
+    // The number of header+payload message blocks to send
     size_t block_count;
 
     std::uintptr_t native_socket;
     boost::asio::ip::address &target_address;
     uint16_t target_port;
     boost::asio::ip::address &source_address;
+
+    /**
+     * @brief Returns a payload buffer descriptor for the given payload offset.
+     * @param offset The offset in the total payload data (bytes).
+     * @return Buffer descriptor describing the region at the given offset.
+     */
+    buffer_descriptor_t
+    buffer_for_payload_offset(ptrdiff_t offset) {
+      for (const auto &desc : payload_buffers) {
+        if (offset < desc.size) {
+          return {
+            desc.buffer + offset,
+            desc.size - offset,
+          };
+        }
+        else {
+          offset -= desc.size;
+        }
+      }
+      return {};
+    }
   };
   bool
   send_batch(batched_send_info_t &send_info);
 
   struct send_info_t {
-    const char *buffer;
-    size_t size;
+    const char *header;
+    size_t header_size;
+    const char *payload;
+    size_t payload_size;
 
     std::uintptr_t native_socket;
     boost::asio::ip::address &target_address;
@@ -783,7 +859,16 @@ namespace platf {
   init();
 
   /**
+   * @brief Returns the current computer name in UTF-8.
+   * @return Computer name or a placeholder upon failure.
+   */
+  std::string
+  get_host_name();
+
+  /**
    * @brief Gets the supported gamepads for this platform backend.
+   * @details This may be called prior to `platf::input()`!
+   * @param input Pointer to the platform's `input_t` or `nullptr`.
    * @return Vector of gamepad options and status.
    */
   std::vector<supported_gamepad_t> &

@@ -41,7 +41,7 @@ jobs:
 
       - name: Setup Release
         id: setup_release
-        uses: LizardByte/setup-release-action@v2024.714.140421
+        uses: LizardByte/setup-release-action@v2024.919.143601
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -74,6 +74,8 @@ jobs:
   build_linux_flatpak:
     env:
       APP_ID: dev.lizardbyte.app.Sunshine
+      NODE_VERSION: "20"
+      PLATFORM_VERSION: "23.08"
     name: Linux Flatpak
     runs-on: ubuntu-22.04
     needs: [setup_release, setup_flatpak_matrix]
@@ -97,10 +99,30 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Dependencies Linux Flatpak
-        env:
-          PLATFORM_VERSION: "22.08"
+      - name: Setup node
+        id: node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install npm dependencies
         run: |
+          npm install --package-lock-only
+
+      - name: Debug package-lock.json
+        run: |
+          cat package-lock.json
+
+      - name: Setup python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Dependencies Linux Flatpak
+        run: |
+          python -m pip install ./packaging/linux/flatpak/deps/flatpak-builder-tools/node
+
           sudo apt-get update -y
           sudo apt-get install -y \
             cmake \
@@ -114,9 +136,19 @@ jobs:
             org.flatpak.Builder \
             org.freedesktop.Platform/${{ matrix.arch }}/${PLATFORM_VERSION} \
             org.freedesktop.Sdk/${{ matrix.arch }}/${PLATFORM_VERSION} \
-            org.freedesktop.Sdk.Extension.node18/${{ matrix.arch }}/${PLATFORM_VERSION} \
-            org.freedesktop.Sdk.Extension.vala/${{ matrix.arch }}/${PLATFORM_VERSION} \
+            org.freedesktop.Sdk.Extension.node${NODE_VERSION}/${{ matrix.arch }}/${PLATFORM_VERSION} \
             "
+
+          flatpak run org.flatpak.Builder --version
+
+      - name: flatpak node generator
+        # https://github.com/flatpak/flatpak-builder-tools/blob/master/node/README.md
+        run: |
+          flatpak-node-generator npm package-lock.json
+
+      - name: Debug generated-sources.json
+        run: |
+          cat generated-sources.json
 
       - name: Cache Flatpak build
         uses: actions/cache@v4
@@ -150,14 +182,14 @@ jobs:
           mkdir -p build
           mkdir -p artifacts
 
-          cd build
           cmake -DGITHUB_CLONE_URL=${clone_url} \
+            -B build \
+            -S . \
             -DBUILD_VERSION=${build_version} \
             -DGITHUB_BRANCH=${branch} \
             -DGITHUB_COMMIT=${commit} \
             -DSUNSHINE_CONFIGURE_FLATPAK_MAN=ON \
-            -DSUNSHINE_CONFIGURE_ONLY=ON \
-            ..
+            -DSUNSHINE_CONFIGURE_ONLY=ON
 
       - name: Debug Manifest
         working-directory: build
@@ -167,16 +199,29 @@ jobs:
       - name: Build Linux Flatpak
         working-directory: build
         run: |
-          sudo su $(whoami) -c "flatpak run org.flatpak.Builder --arch=${{ matrix.arch }} --repo=repo --force-clean \
+          sudo su $(whoami) -c "flatpak run org.flatpak.Builder \
+            --arch=${{ matrix.arch }} \
+            --force-clean \
+            --repo=repo \
+            --sandbox \
             --stop-at=cuda build-sunshine ${APP_ID}.yml"
           cp -r .flatpak-builder copy-of-flatpak-builder
-          sudo su $(whoami) -c "flatpak run org.flatpak.Builder --arch=${{ matrix.arch }} --repo=repo --force-clean \
+          sudo su $(whoami) -c "flatpak run org.flatpak.Builder \
+            --arch=${{ matrix.arch }} \
+            --force-clean \
+            --repo=repo \
+            --sandbox \
             build-sunshine ${APP_ID}.yml"
           rm -rf .flatpak-builder
           mv copy-of-flatpak-builder .flatpak-builder
-          sudo su $(whoami) -c "flatpak build-bundle --arch=${{ matrix.arch }} ./repo \
+          sudo su $(whoami) -c "flatpak build-bundle \
+            --arch=${{ matrix.arch }} \
+            ./repo \
             ../artifacts/sunshine_${{ matrix.arch }}.flatpak ${APP_ID}"
-          sudo su $(whoami) -c "flatpak build-bundle --runtime --arch=${{ matrix.arch }} ./repo \
+          sudo su $(whoami) -c "flatpak build-bundle \
+            --runtime \
+            --arch=${{ matrix.arch }} \
+            ./repo \
             ../artifacts/sunshine_debug_${{ matrix.arch }}.flatpak ${APP_ID}.Debug"
 
       - name: Lint Flatpak
@@ -229,6 +274,23 @@ jobs:
           # exit with the correct code
           exit $exit_code
 
+      - name: Package Flathub repo archive
+        # copy files required to generate the Flathub repo
+        if: ${{ matrix.arch == 'x86_64' }}
+        run: |
+          mkdir -p flathub/modules
+          cp ./build/generated-sources.json ./flathub/
+          cp ./build/package-lock.json ./flathub/
+          cp ./build/${APP_ID}.yml ./flathub/
+          cp ./build/${APP_ID}.metainfo.xml ./flathub/
+          cp ./packaging/linux/flatpak/README.md ./flathub/
+          cp ./packaging/linux/flatpak/flathub.json ./flathub/
+          cp -r ./packaging/linux/flatpak/modules/. ./flathub/modules/
+          # submodules will need to be handled in the workflow that creates the PR
+
+          # create the archive
+          tar -czf ./artifacts/flathub.tar.gz -C ./flathub .
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -237,11 +299,10 @@ jobs:
 
       - name: Create/Update GitHub Release
         if: ${{ needs.setup_release.outputs.publish_release == 'true' }}
-        uses: LizardByte/create-release-action@v2024.614.221009
+        uses: LizardByte/create-release-action@v2024.919.143026
         with:
           allowUpdates: true
           body: ${{ needs.setup_release.outputs.release_body }}
-          discussionCategory: announcements
           generateReleaseNotes: ${{ needs.setup_release.outputs.release_generate_release_notes }}
           name: ${{ needs.setup_release.outputs.release_tag }}
           prerelease: true
@@ -257,7 +318,7 @@ jobs:
       matrix:
         include:  # package these differently
           - type: AppImage
-            EXTRA_ARGS: '-DSUNSHINE_BUILD_APPIMAGE=ON'
+            EXTRA_ARGS: '--appimage-build'
             dist: 22.04
 
     steps:
@@ -276,81 +337,23 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install wget
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            wget
-
-      - name: Install CUDA
-        env:
-          CUDA_VERSION: 11.8.0
-          CUDA_BUILD: 520.61.05
-        timeout-minutes: 4
-        run: |
-          url_base="https://developer.download.nvidia.com/compute/cuda/${CUDA_VERSION}/local_installers"
-          url="${url_base}/cuda_${CUDA_VERSION}_${CUDA_BUILD}_linux.run"
-          sudo wget -q -O /root/cuda.run ${url}
-          sudo chmod a+x /root/cuda.run
-          sudo /root/cuda.run --silent --toolkit --toolkitpath=/usr/local/cuda --no-opengl-libs --no-man-page --no-drm
-          sudo rm /root/cuda.run
-
       - name: Setup Dependencies Linux
         timeout-minutes: 5
         run: |
-          # allow newer gcc
-          sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+          # create the artifacts directory
+          mkdir -p artifacts
 
-          # allow libfuse2 for appimage on 22.04
+          # allow libfuse2 for appimage on 22.04+
           sudo add-apt-repository universe
 
-          # libx11-xcb-dev and libxcb-dri3-dev are required for building libva
           sudo apt-get install -y \
-            build-essential \
-            cmake \
-            doxygen \
-            graphviz \
-            gcc-10 \
-            g++-10 \
-            libayatana-appindicator3-dev \
-            libavdevice-dev \
-            libcap-dev \
-            libcurl4-openssl-dev \
             libdrm-dev \
-            libevdev-dev \
             libfuse2 \
-            libminiupnpc-dev \
-            libnotify-dev \
-            libnuma-dev \
-            libopus-dev \
-            libpulse-dev \
-            libssl-dev \
-            libvdpau-dev \
+            libgl-dev \
             libwayland-dev \
-            libx11-dev \
             libx11-xcb-dev \
             libxcb-dri3-dev \
-            libxcb-shm0-dev \
-            libxcb-xfixes0-dev \
-            libxcb1-dev \
-            libxfixes-dev \
-            libxrandr-dev \
-            libxtst-dev \
-            python3 \
-            python3-venv
-
-          # clean apt cache
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-
-          # Update gcc alias
-          # https://stackoverflow.com/a/70653945/11214013
-          sudo update-alternatives --install \
-            /usr/bin/gcc gcc /usr/bin/gcc-10 100 \
-            --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
-            --slave /usr/bin/gcov gcov /usr/bin/gcov-10 \
-            --slave /usr/bin/gcc-ar gcc-ar /usr/bin/gcc-ar-10 \
-            --slave /usr/bin/gcc-ranlib gcc-ranlib /usr/bin/gcc-ranlib-10
+            libxfixes-dev
 
       - name: Setup python
         id: python
@@ -371,7 +374,7 @@ jobs:
             --enable-x11 \
             --enable-glx \
             --enable-wayland \
-            --without-legacy # emgd, nvctrl, fglrx
+            --without-legacy  # emgd, nvctrl, fglrx
           make -j $(nproc)
           sudo make install
           cd .. && rm -rf libva-*
@@ -381,28 +384,15 @@ jobs:
           BRANCH: ${{ github.head_ref || github.ref_name }}
           BUILD_VERSION: ${{ needs.setup_release.outputs.release_tag }}
           COMMIT: ${{ needs.setup_release.outputs.release_commit }}
-        timeout-minutes: 10
         run: |
-          echo "nproc: $(nproc)"
-
-          mkdir -p build
-          mkdir -p artifacts
-
-          cd build
-          cmake \
-            -DBUILD_WERROR=ON \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_COMPILER:PATH=/usr/local/cuda/bin/nvcc \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DSUNSHINE_ASSETS_DIR=share/sunshine \
-            -DSUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine \
-            -DSUNSHINE_ENABLE_WAYLAND=ON \
-            -DSUNSHINE_ENABLE_X11=ON \
-            -DSUNSHINE_ENABLE_DRM=ON \
-            -DSUNSHINE_ENABLE_CUDA=ON \
-            ${{ matrix.EXTRA_ARGS }} \
-            ..
-          make -j $(expr $(nproc) - 1)  # use all but one core
+          chmod +x ./scripts/linux_build.sh
+          ./scripts/linux_build.sh \
+            --publisher-name='${{ github.repository_owner }}' \
+            --publisher-website='https://app.lizardbyte.dev' \
+            --publisher-issue-url='https://app.lizardbyte.dev/support' \
+            --skip-cleanup \
+            --skip-package \
+            --ubuntu-test-repo ${{ matrix.EXTRA_ARGS }}
 
       - name: Set AppImage Version
         if: |
@@ -416,7 +406,7 @@ jobs:
         working-directory: build
         run: |
           # install sunshine to the DESTDIR
-          make install DESTDIR=AppDir
+          DESTDIR=AppDir ninja install
 
           # custom AppRun file
           cp -f ../packaging/linux/AppImage/AppRun ./AppDir/
@@ -454,7 +444,7 @@ jobs:
       - name: Delete CUDA
         # free up space on the runner
         run: |
-          sudo rm -rf /usr/local/cuda
+          rm -rf ./build/cuda
 
       - name: Verify AppImage
         if: ${{ matrix.type == 'AppImage' }}
@@ -498,12 +488,11 @@ jobs:
         working-directory: build
         run: |
           ${{ steps.python.outputs.python-path }} -m pip install gcovr
-          ${{ steps.python.outputs.python-path }} -m gcovr -r .. \
+          ${{ steps.python.outputs.python-path }} -m gcovr . -r ../src \
             --exclude-noncode-lines \
             --exclude-throw-branches \
             --exclude-unreachable-branches \
-            --exclude '.*tests/.*' \
-            --exclude '.*third-party/.*' \
+            --verbose \
             --xml-pretty \
             -o coverage.xml
 
@@ -524,11 +513,10 @@ jobs:
 
       - name: Create/Update GitHub Release
         if: ${{ needs.setup_release.outputs.publish_release == 'true' }}
-        uses: LizardByte/create-release-action@v2024.614.221009
+        uses: LizardByte/create-release-action@v2024.919.143026
         with:
           allowUpdates: true
           body: ${{ needs.setup_release.outputs.release_body }}
-          discussionCategory: announcements
           generateReleaseNotes: ${{ needs.setup_release.outputs.release_generate_release_notes }}
           name: ${{ needs.setup_release.outputs.release_tag }}
           prerelease: true
@@ -543,8 +531,6 @@ jobs:
         include:
           # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories
           # while GitHub has larger macOS runners, they are not available for our repos :(
-          - os_version: "12"
-            os_name: "macos"
           - os_version: "13"
             os_name: "macos"
           - os_version: "14"
@@ -560,6 +546,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Fix python
+        if: matrix.os_name == 'macos' && matrix.os_version == '13'
+        run: |
+          rm '/usr/local/bin/2to3'
+          rm '/usr/local/bin/2to3-3.12'
+          rm '/usr/local/bin/idle3'
+          rm '/usr/local/bin/idle3.12'
+          rm '/usr/local/bin/pydoc3'
+          rm '/usr/local/bin/pydoc3.12'
+          rm '/usr/local/bin/python3'
+          rm '/usr/local/bin/python3-config'
+          rm '/usr/local/bin/python3.12'
+          rm '/usr/local/bin/python3.12-config'
+          brew install python
 
       - name: Configure formula
         run: |
@@ -597,9 +598,10 @@ jobs:
           echo "Clone URL: ${clone_url}"
           echo "Tag: ${tag}"
 
-          mkdir build
-          cd build
+          mkdir -p build
           cmake \
+            -B build \
+            -S . \
             -DBUILD_VERSION="${build_version}" \
             -DFORMULA_VERSION="${version}" \
             -DGITHUB_BRANCH="${branch}" \
@@ -608,9 +610,7 @@ jobs:
             -DGITHUB_DEFAULT_BRANCH="${default_branch}" \
             -DGITHUB_TAG="${tag}" \
             -DSUNSHINE_CONFIGURE_HOMEBREW=ON \
-            -DSUNSHINE_CONFIGURE_ONLY=ON \
-            ..
-          cd ..
+            -DSUNSHINE_CONFIGURE_ONLY=ON
 
           # copy formula to artifacts
           mkdir -p homebrew
@@ -643,7 +643,7 @@ jobs:
       - name: Validate Homebrew Formula
         if: |
           matrix.release != true
-        uses: LizardByte/homebrew-release-action@v2024.612.21058
+        uses: LizardByte/homebrew-release-action@v2024.1105.185654
         with:
           formula_file: ${{ github.workspace }}/homebrew/sunshine.rb
           git_email: ${{ secrets.GH_BOT_EMAIL }}
@@ -656,17 +656,50 @@ jobs:
         if: >-
           matrix.release &&
           needs.setup_release.outputs.publish_release == 'true'
-        uses: LizardByte/create-release-action@v2024.614.221009
+        uses: LizardByte/create-release-action@v2024.919.143026
         with:
           allowUpdates: true
           artifacts: '${{ github.workspace }}/homebrew/*'
           body: ${{ needs.setup_release.outputs.release_body }}
-          discussionCategory: announcements
           generateReleaseNotes: ${{ needs.setup_release.outputs.release_generate_release_notes }}
           name: ${{ needs.setup_release.outputs.release_tag }}
           prerelease: true
           tag: ${{ needs.setup_release.outputs.release_tag }}
           token: ${{ secrets.GH_BOT_TOKEN }}
+
+      - name: Patch homebrew formula
+        # create beta version of the formula
+        # don't run this on macOS, as the sed command fails
+        if: >-
+          matrix.release
+        run: |
+          # variables
+          formula_file="homebrew/sunshine-beta.rb"
+
+          # rename the file
+          mv homebrew/sunshine.rb $formula_file
+
+          # update the formula
+          sed -i 's/class Sunshine < Formula/class SunshineBeta < Formula/' $formula_file
+          sed -i 's/# conflicts_with/conflicts_with/' $formula_file
+
+          # print new file
+          echo "New formula:"
+          cat $formula_file
+
+      - name: Upload Homebrew Beta Formula
+        if: >-
+          github.repository_owner == 'LizardByte' &&
+          matrix.release &&
+          needs.setup_release.outputs.publish_release == 'true'
+        uses: LizardByte/homebrew-release-action@v2024.1105.185654
+        with:
+          formula_file: ${{ github.workspace }}/homebrew/sunshine-beta.rb
+          git_email: ${{ secrets.GH_BOT_EMAIL }}
+          git_username: ${{ secrets.GH_BOT_NAME }}
+          publish: true
+          token: ${{ secrets.GH_BOT_TOKEN }}
+          validate: false
 
   build_mac_port:
     needs: [setup_release]
@@ -676,9 +709,8 @@ jobs:
         include:
           # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories
           # while GitHub has larger macOS runners, they are not available for our repos :(
-          - os_version: "12"
-            release: true
           - os_version: "13"
+            release: true
           - os_version: "14"
     name: Macports (macOS-${{ matrix.os_version }})
     runs-on: macos-${{ matrix.os_version }}
@@ -731,17 +763,16 @@ jobs:
           echo "Commit: ${commit}"
           echo "Clone URL: ${clone_url}"
 
-          mkdir build
-          cd build
+          mkdir -p build
           cmake \
+            -B build \
+            -S . \
             -DBUILD_VERSION=${build_version} \
             -DGITHUB_BRANCH=${branch} \
             -DGITHUB_COMMIT=${commit} \
             -DGITHUB_CLONE_URL=${clone_url} \
             -DSUNSHINE_CONFIGURE_PORTFILE=ON \
-            -DSUNSHINE_CONFIGURE_ONLY=ON \
-            ..
-          cd ..
+            -DSUNSHINE_CONFIGURE_ONLY=ON
 
           # copy Portfile to artifacts
           mkdir -p artifacts
@@ -889,12 +920,10 @@ jobs:
 
           cd ${build_dir}
           ${{ steps.python.outputs.python-path }} -m pip install gcovr
-          sudo ${{ steps.python.outputs.python-path }} -m gcovr -r ../${dir} \
+          sudo ${{ steps.python.outputs.python-path }} -m gcovr . -r ../${dir}/src \
             --exclude-noncode-lines \
             --exclude-throw-branches \
             --exclude-unreachable-branches \
-            --exclude '.*${dir}/tests/.*' \
-            --exclude '.*${dir}/third-party/.*' \
             --gcov-object-directory $(pwd) \
             --verbose \
             --xml-pretty \
@@ -917,11 +946,10 @@ jobs:
 
       - name: Create/Update GitHub Release
         if: ${{ needs.setup_release.outputs.publish_release == 'true' }}
-        uses: LizardByte/create-release-action@v2024.614.221009
+        uses: LizardByte/create-release-action@v2024.919.143026
         with:
           allowUpdates: true
           body: ${{ needs.setup_release.outputs.release_body }}
-          discussionCategory: announcements
           generateReleaseNotes: ${{ needs.setup_release.outputs.release_generate_release_notes }}
           name: ${{ needs.setup_release.outputs.release_tag }}
           prerelease: true
@@ -1048,31 +1076,21 @@ jobs:
           msystem: ucrt64
           update: true
           install: >-
-            wget
-
-      - name: Update Windows dependencies
-        shell: msys2 {0}
-        run: |
-          # download working curl
-          wget https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-curl-8.8.0-1-any.pkg.tar.zst
-
-          # install dependencies
-          pacman -U --noconfirm mingw-w64-ucrt-x86_64-curl-8.8.0-1-any.pkg.tar.zst
-          pacman -Syu --noconfirm \
-            --ignore=mingw-w64-ucrt-x86_64-curl \
-            git \
-            mingw-w64-ucrt-x86_64-boost \
-            mingw-w64-ucrt-x86_64-cmake \
-            mingw-w64-ucrt-x86_64-cppwinrt \
-            mingw-w64-ucrt-x86_64-graphviz \
-            mingw-w64-ucrt-x86_64-miniupnpc \
-            mingw-w64-ucrt-x86_64-nlohmann-json \
-            mingw-w64-ucrt-x86_64-nodejs \
-            mingw-w64-ucrt-x86_64-nsis \
-            mingw-w64-ucrt-x86_64-onevpl \
-            mingw-w64-ucrt-x86_64-openssl \
-            mingw-w64-ucrt-x86_64-opus \
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-graphviz
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-nodejs
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
             mingw-w64-ucrt-x86_64-toolchain
+            wget
 
       - name: Install Doxygen
         # GCC compiled doxygen has issues when running graphviz
@@ -1100,7 +1118,6 @@ jobs:
           Remove-Item -Path doxygen-setup.exe
 
       - name: Setup python
-        # use this instead of msys2 python due to known issues using wheels, https://www.msys2.org/docs/python/
         id: setup-python
         uses: actions/setup-python@v5
         with:
@@ -1120,17 +1137,19 @@ jobs:
       - name: Build Windows
         shell: msys2 {0}
         run: |
-          mkdir build
-          cd build
+          mkdir -p build
           cmake \
+            -B build \
+            -G Ninja \
+            -S . \
             -DBUILD_WERROR=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DPython_EXECUTABLE='${{ steps.python-path.outputs.python-path }}' \
             -DSUNSHINE_ASSETS_DIR=assets \
-            -DTESTS_SOFTWARE_ENCODER_UNAVAILABLE='skip' \
-            -G "MinGW Makefiles" \
-            ..
-          mingw32-make -j$(nproc)
+            -DSUNSHINE_PUBLISHER_NAME='${{ github.repository_owner }}' \
+            -DSUNSHINE_PUBLISHER_WEBSITE='https://app.lizardbyte.dev' \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL='https://app.lizardbyte.dev/support' \
+            -DTESTS_SOFTWARE_ENCODER_UNAVAILABLE='skip'
+          ninja -C build
 
       - name: Package Windows
         shell: msys2 {0}
@@ -1161,12 +1180,11 @@ jobs:
         working-directory: build
         run: |
           ${{ steps.python-path.outputs.python-path }} -m pip install gcovr
-          ${{ steps.python-path.outputs.python-path }} -m gcovr -r .. \
+          ${{ steps.python-path.outputs.python-path }} -m gcovr . -r ../src \
             --exclude-noncode-lines \
             --exclude-throw-branches \
             --exclude-unreachable-branches \
-            --exclude '.*tests/.*' \
-            --exclude '.*third-party/.*' \
+            --verbose \
             --xml-pretty \
             -o coverage.xml
 
@@ -1206,11 +1224,10 @@ jobs:
 
       - name: Create/Update GitHub Release
         if: ${{ needs.setup_release.outputs.publish_release == 'true' }}
-        uses: LizardByte/create-release-action@v2024.614.221009
+        uses: LizardByte/create-release-action@v2024.919.143026
         with:
           allowUpdates: true
           body: ${{ needs.setup_release.outputs.release_body }}
-          discussionCategory: announcements
           generateReleaseNotes: ${{ needs.setup_release.outputs.release_generate_release_notes }}
           name: ${{ needs.setup_release.outputs.release_tag }}
           prerelease: true

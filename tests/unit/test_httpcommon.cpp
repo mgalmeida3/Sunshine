@@ -4,9 +4,9 @@
  */
 #include <src/httpcommon.h>
 
-#include <tests/conftest.cpp>
+#include "../tests_common.h"
 
-class UrlEscapeTest: public ::testing::TestWithParam<std::tuple<std::string, std::string>> {};
+struct UrlEscapeTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
 TEST_P(UrlEscapeTest, Run) {
   auto [input, expected] = GetParam();
@@ -16,12 +16,12 @@ TEST_P(UrlEscapeTest, Run) {
 INSTANTIATE_TEST_SUITE_P(
   UrlEscapeTests,
   UrlEscapeTest,
-  ::testing::Values(
+  testing::Values(
     std::make_tuple("igdb_0123456789", "igdb_0123456789"),
     std::make_tuple("../../../", "..%2F..%2F..%2F"),
     std::make_tuple("..*\\", "..%2A%5C")));
 
-class UrlGetHostTest: public ::testing::TestWithParam<std::tuple<std::string, std::string>> {};
+struct UrlGetHostTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
 TEST_P(UrlGetHostTest, Run) {
   auto [input, expected] = GetParam();
@@ -31,12 +31,12 @@ TEST_P(UrlGetHostTest, Run) {
 INSTANTIATE_TEST_SUITE_P(
   UrlGetHostTests,
   UrlGetHostTest,
-  ::testing::Values(
+  testing::Values(
     std::make_tuple("https://images.igdb.com/example.txt", "images.igdb.com"),
     std::make_tuple("http://localhost:8080", "localhost"),
     std::make_tuple("nonsense!!}{::", "")));
 
-class DownloadFileTest: public ::testing::TestWithParam<std::tuple<std::string, std::string>> {};
+struct DownloadFileTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
 TEST_P(DownloadFileTest, Run) {
   auto [url, filename] = GetParam();
@@ -45,9 +45,18 @@ TEST_P(DownloadFileTest, Run) {
   ASSERT_TRUE(http::download_file(url, path));
 }
 
+#ifdef SUNSHINE_BUILD_FLATPAK
+// requires running `npm run serve` prior to running the tests
+constexpr const char *URL_1 = "http://0.0.0.0:3000/hello.txt";
+constexpr const char *URL_2 = "http://0.0.0.0:3000/hello-redirect.txt";
+#else
+constexpr const char *URL_1 = "https://httpbin.org/base64/aGVsbG8h";
+constexpr const char *URL_2 = "https://httpbin.org/redirect-to?url=/base64/aGVsbG8h";
+#endif
+
 INSTANTIATE_TEST_SUITE_P(
   DownloadFileTests,
   DownloadFileTest,
-  ::testing::Values(
-    std::make_tuple("https://httpbin.org/base64/aGVsbG8h", "hello.txt"),
-    std::make_tuple("https://httpbin.org/redirect-to?url=/base64/aGVsbG8h", "hello-redirect.txt")));
+  testing::Values(
+    std::make_tuple(URL_1, "hello.txt"),
+    std::make_tuple(URL_2, "hello-redirect.txt")));

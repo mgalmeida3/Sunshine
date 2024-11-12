@@ -16,6 +16,9 @@ extern boost::log::sources::severity_logger<int> info;
 extern boost::log::sources::severity_logger<int> warning;
 extern boost::log::sources::severity_logger<int> error;
 extern boost::log::sources::severity_logger<int> fatal;
+#ifdef SUNSHINE_TESTS
+extern boost::log::sources::severity_logger<int> tests;
+#endif
 
 #include "config.h"
 #include "stat_trackers.h"
@@ -40,6 +43,9 @@ namespace logging {
    */
   void
   deinit();
+
+  void
+  formatter(const boost::log::record_view &view, boost::log::formatting_ostream &os);
 
   /**
    * @brief Initialize the logging system.
@@ -203,5 +209,21 @@ namespace logging {
     std::chrono::steady_clock::time_point point1 = std::chrono::steady_clock::now();
     min_max_avg_periodic_logger<double> logger;
   };
+
+  /**
+   * @brief Enclose string in square brackets.
+   * @param input Input string.
+   * @return Enclosed string.
+   */
+  std::string
+  bracket(const std::string &input);
+
+  /**
+   * @brief Enclose string in square brackets.
+   * @param input Input string.
+   * @return Enclosed string.
+   */
+  std::wstring
+  bracket(const std::wstring &input);
 
 }  // namespace logging

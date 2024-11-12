@@ -163,7 +163,7 @@ namespace net {
   }
 
   host_t
-  host_create(af_e af, ENetAddress &addr, std::size_t peers, std::uint16_t port) {
+  host_create(af_e af, ENetAddress &addr, std::uint16_t port) {
     static std::once_flag enet_init_flag;
     std::call_once(enet_init_flag, []() {
       enet_initialize();
@@ -173,7 +173,8 @@ namespace net {
     enet_address_set_host(&addr, any_addr.data());
     enet_address_set_port(&addr, port);
 
-    auto host = host_t { enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, peers, 0, 0, 0) };
+    // Maximum of 128 clients, which should be enough for anyone
+    auto host = host_t { enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0) };
 
     // Enable opportunistic QoS tagging (automatically disables if the network appears to drop tagged packets)
     enet_socket_set_option(host->socket, ENET_SOCKOPT_QOS, 1);
@@ -205,5 +206,35 @@ namespace net {
     }
 
     return mapped_port;
+  }
+
+  /**
+   * @brief Returns a string for use as the instance name for mDNS.
+   * @param hostname The hostname to use for instance name generation.
+   * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
+   */
+  std::string
+  mdns_instance_name(const std::string_view &hostname) {
+    // Start with the unmodified hostname
+    std::string instancename { hostname.data(), hostname.size() };
+
+    // Truncate to 63 characters per RFC 6763 section 7.2.
+    if (instancename.size() > 63) {
+      instancename.resize(63);
+    }
+
+    for (auto i = 0; i < instancename.size(); i++) {
+      // Replace any spaces with dashes
+      if (instancename[i] == ' ') {
+        instancename[i] = '-';
+      }
+      else if (!std::isalnum(instancename[i]) && instancename[i] != '-') {
+        // Stop at the first invalid character
+        instancename.resize(i);
+        break;
+      }
+    }
+
+    return !instancename.empty() ? instancename : "Sunshine";
   }
 }  // namespace net

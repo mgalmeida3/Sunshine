@@ -40,6 +40,7 @@
 # build directories
 build/
 cmake-*/
+docs/doxyconfig*
 
 # npm
 node_modules/
@@ -51,3 +52,7 @@ package-lock.json
 
 # Dummy macOS files
 .DS_Store
+
+# Python
+*.pyc
+venv/
